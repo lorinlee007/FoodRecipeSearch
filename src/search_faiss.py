@@ -2,6 +2,7 @@
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import faiss
+faiss.omp_set_num_threads(1)
 import torch
 import json
 import re

@@ -23,6 +23,7 @@ The project includes an `environment.yml` file that defines all Python dependenc
 Create the environment using:
 
 ```
+conda config --set channel_priority flexible 
 conda env create -f environment.yml
 conda activate foodrec
 ```
@@ -35,7 +36,7 @@ The environment file installs Java 21 via Conda (openjdk=21). However, if your s
 
 3.1 Check what Java Conda installed
 
-After activating the environment:
+After activating the `foodrec` environment:
 
 ```
 conda activate foodrec
@@ -80,23 +81,37 @@ java -version
 
 **Run all Python scripts from inside the src directory so their relative paths resolve**
 
+```
+cd src
+```
+
+All Python commands below assume your current working directory is `src/`.
+
 ### Step 1 [Data Processing]
 
 First run `data_process.py` and `build_dsp_metadata.py` from the **src** directory (order doesn’t matter). Both scripts read `data/raw/RAW_recipes.csv` and emit cleaned JSONL files: `data_process.py` produces `data/processed/clean_recipes_input.jsonl`, which later feeds the embedding builder (embed_recipes.py) and the BM25 corpus/index (create_bm25_corpus.py, plus any Lucene build step). `build_dsp_metadata.py` writes `data/processed/recipes_display.jsonl`, which supplies the rich metadata shown in semantic and BM25 search results.
 
-### Step 2 [Embedding Index Building]
+### Step 2 [Embedding Searcher]
+
+Run python `search_faiss.py` from **src** using the existing FAISS index and display metadata. The script lazily loads `data/embeddings/all-MiniLM-L6-v2.faiss`, the metadata from `data/processed/recipes_display.jsonl`, and the same all-MiniLM-L6-v2 SentenceTransformer. For each query (e.g., the sample \"healthy quick meal\" in \_\_main\_\_), it normalizes the text, encodes it on the available device (MPS if present, otherwise CPU), searches the FAISS index with the configured recall (RECALL = 5), and prints a list of top hits with scores, recipe IDs, and names. This is the semantic search demo.
+
+#### Step 2.1 [Building the FAISS based Embedding Index]
+
+If you want to regenerate the embeddings from scratch, you can follow the two steps below. Note: Embeddings can differ slightly from machine to machine due to variations in hardware, BLAS libraries, and PyTorch versions. As a result, FAISS scores and rankings may not exactly match the results reported in this project.
 
 Run python `embed_recipes.py` from **src** to build embeddings. It consumes `data/processed/clean_recipes_input.jsonl`, processes recipes in chunks of CHUNK\_SIZE = 5000, encodes each chunk in batches of BATCH_SIZE = 128 using the all-MiniLM-L6-v2 SentenceTransformer (embedding dimension EMB_DIM = 384), and writes N_RECIPES = 231,637 normalized vectors to `data/embeddings/all-MiniLM-L6-v2.data` (NumPy memmap) plus matching IDs to `data/embeddings/all-MiniLM-L6-v2.txt`. These outputs feed `build_faiss_from_memmap.py` to create the FAISS index.
 
-Run python `build_faiss_from_memmap.py` from inside **src** after `embed_recipes.py` completes. The script reads the memmapped embeddings (`data/embeddings/all-MiniLM-L6-v2.data`) and matching ID list (`data/embeddings/all-MiniLM-L6-v2.txt1`), infers N from the file size (each 384‑dim vector stored as float32, so 4 * EMB_DIM bytes per vector), and asserts the ID count matches. It builds a FAISS IndexFlatIP wrapped in IndexIDMap2 so each vector retains its recipe ID, adds the entire dataset in one call (index.add_with_ids), and saves the resulting index to `data/embeddings/all-MiniLM-L6-v2.faiss` for semantic search.
+Run python `build_faiss_from_memmap.py` from inside **src** after `embed_recipes.py` completes. The script reads the memmapped embeddings (`data/embeddings/all-MiniLM-L6-v2.data`) and matching ID list (`data/embeddings/all-MiniLM-L6-v2.txt`), infers N from the file size (each 384‑dim vector stored as float32, so 4 * EMB_DIM bytes per vector), and asserts the ID count matches. It builds a FAISS IndexFlatIP wrapped in IndexIDMap2 so each vector retains its recipe ID, adds the entire dataset in one call (index.add_with_ids), and saves the resulting index to `data/embeddings/all-MiniLM-L6-v2.faiss` for semantic search.
 
-Run python `search_faiss.py` from **src** once the FAISS index and display metadata exist. The script lazily loads `data/embeddings/all-MiniLM-L6-v2.faiss`, the metadata from `data/processed/recipes_display.jsonl`, and the same all-MiniLM-L6-v2 SentenceTransformer. For each query (e.g., the sample \"healthy quick meal\" in \_\_main\_\_), it normalizes the text, encodes it on the available device (MPS if present, otherwise CPU), searches the FAISS index with the configured recall (RECALL = 5), and prints a list of top hits with scores, recipe IDs, and names. This is the semantic search demo.
+### Step 3 [BM25 Searcher]
 
-### Step 3 [BM25 Index Building]
+Run python `search_bm25.py` from **src** using the existing Lucene index under `data/bm25/index`. The script loads that index with Pyserini, applies the same light_normalize as earlier, sets BM25 parameters (k1 = 0.9, b = 0.4), and executes queries (see the sample list in \_\_main\_\_). For each hit it retrieves the stored raw JSON, decodes the display metadata, and prints rank, score, ID, and name. This is the keyword/BM25 demo.
+
+#### Step 3.1 [Building the Lucene Index]
 
 Run python `create_bm25_corpus.py` from **src** after generating both `data/processed/clean_recipes_input.jsonl` and `data/processed/recipes_display.jsonl`. The script merges the normalized recipe fields with their display metadata, builds a contents string that intentionally repeats the recipe name three times to overweight exact title matches, then appends the description, tags, and ingredients. For each recipe it emits a JSONL document (id, contents, raw) under `data/bm25/corpus/recipes.jsonl`, where raw stores the pretty metadata (minus the ID) so Lucene search results can reconstruct names/descriptions/tags/ingredients for display. This corpus feeds your Lucene/BM25 indexing step.
 
-Next build the Lucene Index, run the following command from the **src** directory. Please note that this is the step that requires Java21. Once the following command complets you will see your Lucene Index in `data/bm25/index/*`
+Next build the Lucene Index, run the following command from the **src** directory. Please note that this is the step that requires Java21. Once the following command completes you will see your Lucene Index in `data/bm25/index/*`
 
 ```
 python -m pyserini.index.lucene \
@@ -107,8 +122,6 @@ python -m pyserini.index.lucene \
   --threads 8 \
   --storePositions --storeDocvectors --storeRaw
 ```
-
-Run python `search_bm25.py` from **src** once you’ve built a Lucene index under `data/bm25/index`. The script loads that index with Pyserini, applies the same light_normalize as earlier, sets BM25 parameters (k1 = 0.9, b = 0.4), and executes queries (see the sample list in \_\_main\_\_). For each hit it retrieves the stored raw JSON, decodes the display metadata, and prints rank, score, ID, and name. This is the keyword/BM25 demo.
 
 ## Trained Model (Embeddings + FAISS Index)
 
